@@ -571,6 +571,18 @@ struct AccountRow: View {
 
                 if let snapshot = account.snapshot {
                     UsageBars(snapshot: snapshot, dimmed: wasted, combined: false, settings: .popup, forceInline: true)
+                    if let resets = UsageText.resetSummary(snapshot) {
+                        Text(resets)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let pace = UsageText.weeklyPaceSummary(snapshot) {
+                        Text(pace)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 } else {
                     Text(account.error ?? "No usage")
                         .font(.caption)
@@ -1041,6 +1053,73 @@ enum UsageMath {
     }
 }
 
+struct UsagePace: Sendable {
+    enum Stage: Sendable {
+        case onTrack
+        case slightlyAhead
+        case ahead
+        case farAhead
+        case slightlyBehind
+        case behind
+        case farBehind
+    }
+
+    let stage: Stage
+    let deltaPercent: Double
+    let etaSeconds: TimeInterval?
+    let willLastToReset: Bool
+
+    static func weekly(window: RateWindow, now: Date = .init(), defaultWindowMinutes: Int = 10_080) -> UsagePace? {
+        guard let resetsAt = window.resetsAt else { return nil }
+        let minutes = window.windowMinutes ?? defaultWindowMinutes
+        guard minutes > 0 else { return nil }
+
+        let duration = TimeInterval(minutes) * 60
+        let timeUntilReset = resetsAt.timeIntervalSince(now)
+        guard timeUntilReset > 0, timeUntilReset <= duration else { return nil }
+
+        let elapsed = min(max(duration - timeUntilReset, 0), duration)
+        let expected = min(max((elapsed / duration) * 100, 0), 100)
+        let actual = min(max(window.usedPercent, 0), 100)
+        if elapsed == 0, actual > 0 { return nil }
+
+        let delta = actual - expected
+        let stage = Self.stage(for: delta)
+
+        var etaSeconds: TimeInterval?
+        var willLastToReset = false
+
+        if elapsed > 0, actual > 0 {
+            let rate = actual / elapsed
+            if rate > 0 {
+                let remaining = max(0, 100 - actual)
+                let eta = remaining / rate
+                if eta >= timeUntilReset {
+                    willLastToReset = true
+                } else {
+                    etaSeconds = eta
+                }
+            }
+        } else if elapsed > 0, actual == 0 {
+            willLastToReset = true
+        }
+
+        return UsagePace(
+            stage: stage,
+            deltaPercent: delta,
+            etaSeconds: etaSeconds,
+            willLastToReset: willLastToReset)
+    }
+
+    private static func stage(for delta: Double) -> Stage {
+        let absDelta = abs(delta)
+        if absDelta <= 2 { return .onTrack }
+        if absDelta <= 6 { return delta >= 0 ? .slightlyAhead : .slightlyBehind }
+        if absDelta <= 12 { return delta >= 0 ? .ahead : .behind }
+        return delta >= 0 ? .farAhead : .farBehind
+    }
+}
+
 enum UsageText {
     static func remaining(_ window: RateWindow) -> String {
         "\(Int(window.remainingPercent.rounded()))%"
@@ -1092,6 +1171,66 @@ enum UsageText {
         return Self.countdown(to: reset)
     }
 
+    static func resetSummary(_ snapshot: UsageSnapshot, now: Date = .init()) -> String? {
+        var parts: [String] = []
+        if let primary = snapshot.primary, let line = self.resetLine(for: primary, label: "S", now: now) {
+            parts.append(line)
+        }
+        if let secondary = snapshot.secondary, let line = self.resetLine(for: secondary, label: "W", now: now) {
+            parts.append(line)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    static func weeklyPaceSummary(_ snapshot: UsageSnapshot, now: Date = .init()) -> String? {
+        guard let weekly = snapshot.secondary, let pace = UsagePace.weekly(window: weekly, now: now) else { return nil }
+        let deltaValue = Int(abs(pace.deltaPercent).rounded())
+        let left: String
+        switch pace.stage {
+        case .onTrack:
+            left = "On pace"
+        case .slightlyAhead, .ahead, .farAhead:
+            left = "\(deltaValue)% in deficit"
+        case .slightlyBehind, .behind, .farBehind:
+            left = "\(deltaValue)% in reserve"
+        }
+
+        let right: String?
+        if pace.willLastToReset {
+            right = "Lasts until reset"
+        } else if let etaSeconds = pace.etaSeconds {
+            let eta = self.durationText(seconds: etaSeconds, now: now)
+            right = eta == "now" ? "Runs out now" : "Runs out in \(eta)"
+        } else {
+            right = nil
+        }
+
+        if let right {
+            return "Pace: \(left) · \(right)"
+        }
+        return "Pace: \(left)"
+    }
+
+    static func resetCountdownDescription(from date: Date, now: Date = .init()) -> String {
+        let seconds = max(0, date.timeIntervalSince(now))
+        if seconds < 1 { return "now" }
+
+        let totalMinutes = max(1, Int(ceil(seconds / 60)))
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes / 60) % 24
+        let minutes = totalMinutes % 60
+
+        if days > 0 {
+            if hours > 0 { return "in \(days)d \(hours)h" }
+            return "in \(days)d"
+        }
+        if hours > 0 {
+            if minutes > 0 { return "in \(hours)h \(minutes)m" }
+            return "in \(hours)h"
+        }
+        return "in \(totalMinutes)m"
+    }
+
     static func countdown(to date: Date) -> String {
         let seconds = max(0, Int(date.timeIntervalSinceNow))
         let days = seconds / 86_400
@@ -1100,6 +1239,27 @@ enum UsageText {
         if days > 0 { return "\(days)d \(hours)h" }
         if hours > 0 { return "\(hours)h \(minutes)m" }
         return "\(minutes)m"
+    }
+
+    private static func resetLine(for window: RateWindow, label: String, now: Date) -> String? {
+        if let reset = window.resetsAt {
+            return "\(label) resets \(self.resetCountdownDescription(from: reset, now: now))"
+        }
+        guard let text = window.resetDescription?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+        if text.lowercased().hasPrefix("resets") {
+            return "\(label) \(text)"
+        }
+        return "\(label) resets \(text)"
+    }
+
+    private static func durationText(seconds: TimeInterval, now: Date) -> String {
+        let date = now.addingTimeInterval(seconds)
+        let countdown = self.resetCountdownDescription(from: date, now: now)
+        if countdown == "now" { return "now" }
+        if countdown.hasPrefix("in ") { return String(countdown.dropFirst(3)) }
+        return countdown
     }
 }
 
