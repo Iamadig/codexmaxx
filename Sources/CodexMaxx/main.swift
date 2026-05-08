@@ -377,6 +377,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func switchAccount(named name: String) {
+        self.controller.markActiveLocally(named: name)
+        self.render()
         Task {
             await self.controller.switchToAccount(named: name)
             self.render()
@@ -699,16 +701,26 @@ final class UsageController {
                 for await row in group {
                     rows.append(row)
                 }
-                return rows.sorted { lhs, rhs in
-                    if lhs.active != rhs.active { return lhs.active && !rhs.active }
-                    return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-                }
+                return self.sortAccounts(rows)
             }
             self.updatedAt = Date()
             self.lastError = nil
         } catch {
             self.lastError = error.localizedDescription
         }
+    }
+
+    func markActiveLocally(named name: String) {
+        self.accounts = self.sortAccounts(
+            self.accounts.map { account in
+                CodexAccountUsage(
+                    name: account.name,
+                    label: account.label,
+                    active: account.name == name,
+                    snapshot: account.snapshot,
+                    error: account.error)
+            })
+        self.isRefreshing = true
     }
 
     func switchToAccount(named name: String) async {
@@ -740,6 +752,13 @@ final class UsageController {
             await self.refresh()
         } catch {
             self.lastError = error.localizedDescription
+        }
+    }
+
+    private func sortAccounts(_ accounts: [CodexAccountUsage]) -> [CodexAccountUsage] {
+        accounts.sorted { lhs, rhs in
+            if lhs.active != rhs.active { return lhs.active && !rhs.active }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
     }
 }
