@@ -460,9 +460,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 final class HostingMenuView<Content: View>: NSHostingView<Content> {
+    private static var width: CGFloat { 320 }
+    private static var minimumHeight: CGFloat { 210 }
+
     required init(rootView: Content) {
         super.init(rootView: rootView)
-        self.frame = NSRect(x: 0, y: 0, width: 320, height: 210)
+        self.updateFrameToFitContent()
+    }
+
+    override func layout() {
+        super.layout()
+        self.updateFrameToFitContent()
+    }
+
+    private func updateFrameToFitContent() {
+        let fitted = self.fittingSize
+        let height = max(Self.minimumHeight, ceil(fitted.height))
+        self.frame = NSRect(x: 0, y: 0, width: Self.width, height: height)
     }
 
     @available(*, unavailable)
@@ -1193,6 +1207,10 @@ enum UsageText {
             left = "\(deltaValue)% in deficit"
         case .slightlyBehind, .behind, .farBehind:
             left = "\(deltaValue)% in reserve"
+        }
+
+        if pace.stage == .onTrack {
+            return "Pace: On pace"
         }
 
         let right: String?
